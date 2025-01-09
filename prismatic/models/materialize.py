@@ -51,14 +51,15 @@ VISION_BACKBONES = {
 
 
 # === Language Model Registry ===
+# FIXME: Arjun disabled flash attention for now, to re-enable after fixing import issues
 LLM_BACKBONES = {
     # === LLaMa-2 Pure (Non-Chat) Backbones ===
-    "llama2-7b-pure": {"cls": LLaMa2LLMBackbone, "kwargs": {}},
-    "llama2-13b-pure": {"cls": LLaMa2LLMBackbone, "kwargs": {}},
+    "llama2-7b-pure": {"cls": LLaMa2LLMBackbone, "kwargs": {"use_flash_attention_2": False}},
+    "llama2-13b-pure": {"cls": LLaMa2LLMBackbone, "kwargs": {"use_flash_attention_2": False}},
 
     # === LLaMa-2 Chat Backbones ===
-    "llama2-7b-chat": {"cls": LLaMa2LLMBackbone, "kwargs": {}},
-    "llama2-13b-chat": {"cls": LLaMa2LLMBackbone, "kwargs": {}},
+    "llama2-7b-chat": {"cls": LLaMa2LLMBackbone, "kwargs": {"use_flash_attention_2": False}},
+    "llama2-13b-chat": {"cls": LLaMa2LLMBackbone, "kwargs": {"use_flash_attention_2": False}},
 
     # === Vicuna-v1.5 Backbones ===
     "vicuna-v15-7b": {"cls": LLaMa2LLMBackbone, "kwargs": {}},

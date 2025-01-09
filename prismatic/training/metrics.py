@@ -310,8 +310,9 @@ class VLAMetrics:
         # Note :: Raw Loss is an Average over Gradient Accumulation Steps --> No Smoothing!
         loss_raw = torch.stack(list(self.state["loss_raw"])).mean().item()
         loss = torch.stack(list(self.state["loss"])).mean().item()
-        l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
-        action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
+        # FIXME: can add more metrics back in later
+        # l1_loss = torch.stack(list(self.state["l1_loss"])).mean().item()
+        # action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
         step_time, lr = np.mean(list(self.state["step_time"])), self.state["lr"][-1]
         status = self.get_status(loss)
 
@@ -321,7 +322,7 @@ class VLAMetrics:
             dataset_metrics.update(
                 {
                     f"{ds}/L1 Loss": torch.stack(list(tracker.state["l1_loss"])).mean().item(),
-                    f"{ds}/Action Token Accuracy": torch.stack(list(tracker.state["action_accuracy"])).mean().item(),
+                    # f"{ds}/Action Token Accuracy": torch.stack(list(tracker.state["action_accuracy"])).mean().item(),
                 }
             )
 
@@ -333,8 +334,8 @@ class VLAMetrics:
                 f"{prefix}/Step": self.global_step,
                 f"{prefix}/Epoch": self.epoch,
                 f"{prefix}/Loss": loss,
-                f"{prefix}/L1 Loss": l1_loss,
-                f"{prefix}/Action Token Accuracy": action_accuracy,
+                # f"{prefix}/L1 Loss": l1_loss,
+                # f"{prefix}/Action Token Accuracy": action_accuracy,
                 f"{prefix}/Loss (Raw)": loss_raw,
                 f"{prefix}/Learning Rate": lr,
                 f"{prefix}/Step Time": step_time,

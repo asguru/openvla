@@ -15,7 +15,7 @@ from huggingface_hub import HfFileSystem, hf_hub_download
 from prismatic.conf import ModelConfig
 from prismatic.models.materialize import get_llm_backbone_and_tokenizer, get_vision_backbone_and_transform
 from prismatic.models.registry import GLOBAL_REGISTRY, MODEL_REGISTRY
-from prismatic.models.vlas import OpenVLA
+from prismatic.models.vlas import OpenVLA, OpenVLAFlowMatching
 from prismatic.models.vlms import PrismaticVLM
 from prismatic.overwatch import initialize_overwatch
 from prismatic.vla.action_tokenizer import ActionTokenizer
@@ -54,6 +54,7 @@ def load(
     hf_token: Optional[str] = None,
     cache_dir: Optional[Union[str, Path]] = None,
     load_for_training: bool = False,
+    load_action_expert: bool = False,
 ) -> PrismaticVLM:
     """Loads a pretrained PrismaticVLM from either local disk or the HuggingFace Hub."""
     if os.path.isdir(model_id_or_path):
@@ -106,14 +107,25 @@ def load(
 
     # Load VLM using `from_pretrained` (clobbers HF syntax... eventually should reconcile)
     overwatch.info(f"Loading VLM [bold blue]{model_cfg['model_id']}[/] from Checkpoint")
-    vlm = PrismaticVLM.from_pretrained(
-        checkpoint_pt,
-        model_cfg["model_id"],
-        vision_backbone,
-        llm_backbone,
-        arch_specifier=model_cfg["arch_specifier"],
-        freeze_weights=not load_for_training,
-    )
+    if not load_action_expert:
+        vlm = PrismaticVLM.from_pretrained(
+            checkpoint_pt,
+            model_cfg["model_id"],
+            vision_backbone,
+            llm_backbone,
+            arch_specifier=model_cfg["arch_specifier"],
+            freeze_weights=not load_for_training,
+        )
+    else:
+        vlm = OpenVLAFlowMatching.from_pretrained(
+            checkpoint_pt,
+            model_cfg["model_id"],
+            vision_backbone,
+            llm_backbone,
+            arch_specifier=model_cfg["arch_specifier"],
+            freeze_weights=not load_for_training,
+        )
+
 
     return vlm
 

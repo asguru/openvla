@@ -13,9 +13,9 @@ from transformers import PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import ImageTransform
-from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction, PaddedCollatorForActionPredictionFlowMatching
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.datasets import EpisodicRLDSDataset, RLDSBatchTransform, RLDSDataset
+from prismatic.vla.datasets import EpisodicRLDSDataset, RLDSBatchTransform, RLDSBatchTransformFlowMatching, RLDSDataset
 
 
 def get_vla_dataset_and_collator(
@@ -31,15 +31,27 @@ def get_vla_dataset_and_collator(
     train: bool = True,
     episodic: bool = False,
     image_aug: bool = False,
+    use_action_expert: bool = False
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
     action_tokenizer = ActionTokenizer(tokenizer)
-    batch_transform = RLDSBatchTransform(
-        action_tokenizer, tokenizer, image_transform, prompt_builder_fn, predict_stop_token=predict_stop_token
-    )
-    collator = PaddedCollatorForActionPrediction(
-        tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side
-    )
+    if not use_action_expert:
+        batch_transform = RLDSBatchTransform(
+            action_tokenizer, tokenizer, image_transform, prompt_builder_fn, predict_stop_token=predict_stop_token
+        )
+        collator = PaddedCollatorForActionPrediction(
+            tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side
+        )
+    else:
+        batch_transform = RLDSBatchTransformFlowMatching(
+            action_tokenizer,
+            tokenizer,
+            image_transform=image_transform,
+            prompt_builder_fn=prompt_builder_fn,
+        )
+        collator = PaddedCollatorForActionPredictionFlowMatching(
+            tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side
+        )
 
     # Build RLDS Iterable Dataset
     cls = RLDSDataset if not episodic else EpisodicRLDSDataset

@@ -67,6 +67,24 @@ class RLDSBatchTransform:
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
 
 
+@dataclass
+class RLDSBatchTransformFlowMatching(RLDSBatchTransform):
+    action_tokenizer: ActionTokenizer
+    base_tokenizer: PreTrainedTokenizerBase
+    image_transform: ImageTransform
+    prompt_builder_fn: Type[PromptBuilder]
+    predict_stop_token: bool = True
+
+    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+        """Converts a RLDS batch to the format expected by the OpenVLA collator/models."""
+        output_dict = super().__call__(rlds_batch)
+        action_tensor = torch.tensor(rlds_batch["action"])
+        proprio_tensor = torch.tensor(rlds_batch["observation"]["proprio"])
+        output_dict["action"] = action_tensor
+        output_dict["proprio"] = proprio_tensor
+        return output_dict
+
+
 class RLDSDataset(IterableDataset):
     def __init__(
         self,
@@ -94,14 +112,15 @@ class RLDSDataset(IterableDataset):
             mixture_spec,
             load_camera_views=("primary",),
             load_depth=False,
-            load_proprio=False,
+            load_proprio=True,
             load_language=True,
             action_proprio_normalization_type=NormalizationType.BOUNDS_Q99,
         )
         rlds_config = dict(
             traj_transform_kwargs=dict(
                 window_size=1,                                      # If we wanted to feed / predict more than one step
-                future_action_window_size=0,                        # For action chunking
+                # TODO: understand how this works
+                future_action_window_size=49,                       # For action chunking #TODO: Arjun need to explore changing this
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
             ),

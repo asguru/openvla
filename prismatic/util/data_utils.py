@@ -140,3 +140,18 @@ class PaddedCollatorForActionPrediction:
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
         return output
+
+
+@dataclass
+class PaddedCollatorForActionPredictionFlowMatching(PaddedCollatorForActionPrediction):
+    def __call__(self, instances: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        output = super().__call__(instances)
+        
+        # Concatenate the actions
+        actions = [instance["action"] for instance in instances]
+        actions = torch.stack(actions)
+        proprio = [instance["proprio"] for instance in instances]
+        proprio = torch.stack(proprio)
+        output["action"] = actions
+        output["proprio"] = proprio
+        return output

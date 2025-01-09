@@ -1,0 +1,1 @@
+torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/train.py --vla.type "prism-dinosiglip-224px+mx-bridge" --data_root_dir ./datasets --run_root_dir /home/scratch.driveix_50t_4/aguru/openvla_runs/trainfull --wandb_project maglev-av --wandb_entity maglev

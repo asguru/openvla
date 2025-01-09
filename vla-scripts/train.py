@@ -24,11 +24,13 @@ from typing import Optional, Tuple, Union
 
 import draccus
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import yaml
 
 from prismatic.conf import VLAConfig, VLARegistry
 from prismatic.models import load, load_vla
+from prismatic.models.vlas import OpenVLAFlowMatching
 from prismatic.overwatch import initialize_overwatch
 from prismatic.training import VLAMetrics, get_train_strategy
 from prismatic.util import set_global_seed
@@ -71,6 +73,9 @@ class TrainConfig:
     save_interval: int = 2500                                       # Interval for saving checkpoints (in steps)
     image_aug: bool = False                                         # Whether to enable image augmentations
     seed: int = 7                                                   # Random seed (for reproducibility)
+
+    # Use Action Expert with Flow Matching
+    use_action_expert: bool = True                                 # Whether to use the action expert
 
     # HF Hub Credentials (for any gated models)
     hf_token: Union[str, Path] = Path(".hf_token")                  # Environment variable or Path to HF Token
@@ -140,17 +145,28 @@ def train(cfg: TrainConfig) -> None:
     # Load VLA checkpoint (if resuming from training) or Base VLM otherwise (from `cfg.vla.base_vlm` ID or Path)
     #   =>> Note :: Verifies that all parameters are loaded in FP32 on load!
     overwatch.info(f"Loading Base VLM `{cfg.vla.base_vlm}` from ID/Path")
-    if cfg.pretrained_checkpoint is not None:
-        # [Validate] Pretrained Checkpoint `step` and `epoch` should match `resume_step` and `resume_epoch`
-        #   =>> Note :: We make developers pass in `resume_*` arguments as an extra sanity check!
-        if cfg.is_resume:
-            assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
-            assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
+    if not cfg.use_action_expert:
+        if cfg.pretrained_checkpoint is not None:
+            overwatch.info(f"Pretrained checkpoint was not none")
+            # [Validate] Pretrained Checkpoint `step` and `epoch` should match `resume_step` and `resume_epoch`
+            #   =>> Note :: We make developers pass in `resume_*` arguments as an extra sanity check!
+            if cfg.is_resume:
+                assert int(re.search("step-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_step
+                assert int(re.search("epoch-(.+?)-", cfg.pretrained_checkpoint.name).group(1)) == cfg.resume_epoch
 
-        vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
+            vlm = load_vla(cfg.pretrained_checkpoint, hf_token=hf_token, load_for_training=True)
 
+        else:
+            vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
     else:
-        vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True)
+        """vlm = OpenVLAFlowMatching(
+            "openvla/openvla-7b",
+            torch_dtype=torch.float32,
+            quantization_config=None,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )"""
+        vlm = load(cfg.vla.base_vlm, hf_token=hf_token, load_for_training=True, load_action_expert=True)
 
     # [Validate] Model should be in Full Precision!
     for param in vlm.parameters():
@@ -177,7 +193,8 @@ def train(cfg: TrainConfig) -> None:
 
     # [Explicit] Call to `freeze_backbones` here for clarity =>> will log exactly what is/is not frozen
     overwatch.info(f"Invoking `VLM.freeze_backbones()` for `{vla_id}` => Stage: `{stage}`")
-    vlm.freeze_backbones(stage)
+    # FIXME: Arjun: can uncommment later, want to see what else breaks
+    #vlm.freeze_backbones(stage)
 
     # Print number of total/trainable model parameters
     num_params = sum(p.numel() for p in vlm.parameters())
@@ -197,6 +214,7 @@ def train(cfg: TrainConfig) -> None:
         default_image_resolution=vlm.vision_backbone.default_image_resolution,
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        use_action_expert=cfg.use_action_expert,
     )
 
     # Save dataset statistics for de-normalization at inference time
@@ -241,13 +259,22 @@ def train(cfg: TrainConfig) -> None:
 
     # Run VLA Training
     overwatch.info("Starting VLA Training Loop")
-    train_strategy.run_vla_training(
-        vla_dataset,
-        collator,
-        action_tokenizer,
-        metrics,
-        save_interval=cfg.save_interval,
-    )
+    if not cfg.use_action_expert:
+        train_strategy.run_vla_training(
+            vla_dataset,
+            collator,
+            action_tokenizer,
+            metrics,
+            save_interval=cfg.save_interval,
+        )
+    else:
+        train_strategy.run_vla_fm_training(
+            vla_dataset,
+            collator,
+            action_tokenizer,
+            metrics,
+            save_interval=cfg.save_interval,
+        )
 
     # Finalize
     overwatch.info("Done with Training =>> Finalizing Metrics")

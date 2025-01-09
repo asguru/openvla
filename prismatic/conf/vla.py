@@ -48,11 +48,12 @@ class VLAConfig(ChoiceRegistry):
     train_strategy: str                             # Train Strategy (default "fsdp-full-shard")
 
     # Enable Gradient/Activation Checkpointing (for the LLM Backbone)
-    enable_gradient_checkpointing: bool = True      # Enable Gradient/Activation Checkpointing during Training
+    # FIXME: Arjun set below to False, change back
+    enable_gradient_checkpointing: bool = False      # Enable Gradient/Activation Checkpointing during Training
 
     # Mixed Precision Training via Torch Native AMP (`autocast`)
     enable_mixed_precision_training: bool = True    # Enable Traditional BF16 Mixed Precision
-    reduce_in_full_precision: bool = True           # Accumulate/Reduce All-Gather Gradients in FP32 Full Precision
+    reduce_in_full_precision: bool = True          # Accumulate/Reduce All-Gather Gradients in FP32 Full Precision
 
     # fmt: on
 
@@ -66,8 +67,11 @@ class Exp_SigLIP_224px_Bridge(VLAConfig):
     vla_id: str = "siglip-224px+mx-bridge"
     base_vlm: Union[str, Path] = "siglip-224px+7b"
 
+    # FIXME: can reset to true once this is tested
     freeze_vision_backbone: bool = False
+    # FIXME: can reset to true once this is tested
     freeze_llm_backbone: bool = False
+    # FIXME: can reset to false once this is tested
     unfreeze_last_llm_layer: bool = False
 
     # Data Mixture Parameters
@@ -78,9 +82,11 @@ class Exp_SigLIP_224px_Bridge(VLAConfig):
     epochs: int = 1000
     max_steps: Optional[int] = None
 
+    # FIXME: change back to 8, this is just for testing
     expected_world_size: int = 8
-    global_batch_size: int = 256
-    per_device_batch_size: int = 32
+    # FIXME: change back to 256, this is just for testing
+    global_batch_size: int = 32
+    per_device_batch_size: int = 4
 
     learning_rate: float = 2e-5
     weight_decay: float = 0.0

@@ -27,6 +27,7 @@ from typing import Optional
 
 import draccus
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 import tqdm
 from accelerate import PartialState
@@ -39,11 +40,12 @@ from transformers import AutoConfig, AutoImageProcessor
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
-from prismatic.models import load_vla
+from prismatic.models import load, load_vla
 from prismatic.models.backbones.llm.prompting import PurePromptBuilder, VicunaV15ChatPromptBuilder
-from prismatic.util.data_utils import PaddedCollatorForActionPrediction
+from prismatic.models.vlas import OpenVLAFlowMatching
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction, PaddedCollatorForActionPredictionFlowMatching
 from prismatic.vla.action_tokenizer import ActionTokenizer
-from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
+from prismatic.vla.datasets import RLDSBatchTransform, RLDSBatchTransformFlowMatching, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
@@ -121,6 +123,10 @@ def finetune(cfg: FinetuneConfig) -> None:
     torch.cuda.set_device(device_id := distributed_state.local_process_index)
     torch.cuda.empty_cache()
 
+    # HF Hub Credentials (for any gated models)
+    # Path is to the .hf_token file in the working directory
+    hf_token = Path(".hf_token")
+
     # Configure Unique Experiment ID & Log Directory
     exp_id = (
         f"{cfg.vla_path.split('/')[-1]}+{cfg.dataset_name}"
@@ -156,7 +162,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Load OpenVLA Processor and Model using HF AutoClasses
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
-    vla = AutoModelForVision2Seq.from_pretrained(
+    vla = OpenVLAFlowMatching(
         cfg.vla_path,
         torch_dtype=torch.bfloat16,
         quantization_config=quantization_config,
@@ -167,20 +173,25 @@ def finetune(cfg: FinetuneConfig) -> None:
     # Device Placement =>> note that BitsAndBytes automatically handles for quantized training
     if cfg.use_quantization:
         vla = prepare_model_for_kbit_training(vla)
-    else:
-        vla = vla.to(device_id)
 
     # [LoRA] Wrap Model w/ PEFT `LoraConfig` =>> by default we set `target_modules=all-linear`
     if cfg.use_lora:
+        linear_layer_names = []
+        for name, module in vla.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                linear_layer_names.append(name)
         lora_config = LoraConfig(
             r=cfg.lora_rank,
             lora_alpha=min(cfg.lora_rank, 16),
             lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
+            target_modules=linear_layer_names,
             init_lora_weights="gaussian",
         )
         vla = get_peft_model(vla, lora_config)
         vla.print_trainable_parameters()
+    
+    if not cfg.use_quantization:
+        vla = vla.to(device_id)
 
     # Wrap VLA in PyTorch DDP Wrapper for Multi-GPU Training
     vla = DDP(vla, device_ids=[device_id], find_unused_parameters=True, gradient_as_bucket_view=True)
@@ -207,7 +218,7 @@ def finetune(cfg: FinetuneConfig) -> None:
     #     prompt_builder_fn=PurePromptBuilder if "v01" not in cfg.vla_path else VicunaV15ChatPromptBuilder,
     # )
     # ---
-    batch_transform = RLDSBatchTransform(
+    batch_transform = RLDSBatchTransformFlowMatching(
         action_tokenizer,
         processor.tokenizer,
         image_transform=processor.image_processor.apply_transform,
@@ -217,7 +228,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.data_root_dir,
         cfg.dataset_name,
         batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
+        resize_resolution=tuple(vla.module.vla.config.image_sizes),
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
@@ -227,7 +238,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         save_dataset_statistics(vla_dataset.dataset_statistics, run_dir)
 
     # Create Collator and DataLoader
-    collator = PaddedCollatorForActionPrediction(
+    collator = PaddedCollatorForActionPredictionFlowMatching(
         processor.tokenizer.model_max_length, processor.tokenizer.pad_token_id, padding_side="right"
     )
     dataloader = DataLoader(
@@ -247,19 +258,69 @@ def finetune(cfg: FinetuneConfig) -> None:
     recent_action_accuracies = deque(maxlen=cfg.grad_accumulation_steps)
     recent_l1_losses = deque(maxlen=cfg.grad_accumulation_steps)
 
+    # Declare an MSELoss to be used in flow matching loss expression
+    loss_fn = nn.MSELoss()
+
     # Train!
     with tqdm.tqdm(total=cfg.max_steps, leave=False) as progress:
         vla.train()
         optimizer.zero_grad()
         for batch_idx, batch in enumerate(dataloader):
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                output: CausalLMOutputWithPast = vla(
+                actions = batch["action"].to(device_id)
+                output, flow = vla(
                     input_ids=batch["input_ids"].to(device_id),
                     attention_mask=batch["attention_mask"].to(device_id),
                     pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
                     labels=batch["labels"],
+                    proprio=batch["proprio"].to(device_id),
+                    actions=actions,
+                    output_hidden_states=True
                 )
                 loss = output.loss
+                all_hidden_states = output.hidden_states
+                #print("all hidden states are ", all_hidden_states)
+                
+                # print("max length is")
+                # print(vla.module.vla.config.max_length)
+                # print("llm max length is")
+                # print(vla.module.vla.config.llm_max_length)
+                # print("image sizes are")
+                # print(vla.module.vla.config.image_sizes)
+                # print("Pixel values shape:", batch["pixel_values"].shape)
+                # print("Input ids shape:", batch["input_ids"].shape)
+                # print("Input IDs non-pad count:", (batch["input_ids"][0] != vla.module.vla.config.pad_token_id).sum())
+                # print("ARCH SPECIFIER")
+                # print(vla.module.vla.config.arch_specifier)
+                # print("VISION BACKBONE ID")
+                # print(vla.module.vla.config.vision_backbone_id)
+                # print("ACTION SHAPE IS")
+                # print(batch["action"].shape)
+                # print("FLOW SHAPE IS")
+                # print(flow.shape)
+                random_noise_like_action = torch.randn_like(actions).to(device_id)
+                # Sample pytorch tensor from beta distribution
+                time_sample = torch.distributions.beta.Beta(1.5, 1).sample(actions.shape[:1]).to(device_id)
+                # print("BETA SAMPLE SHAPE IS")
+                # print(time_sample.shape)
+                noised_actions = time_sample * actions + (1 - time_sample) * random_noise_like_action
+                # print("noised actions are")
+                # print(noised_actions)
+                # print("random noise like action is")
+                # print(random_noise_like_action)
+                # print("flow is")
+                # print(flow)
+                d_xt = actions - random_noise_like_action
+                # print("dxt is")
+                # print(d_xt)
+                loss_flow = loss_fn(flow, d_xt)
+                # print("NOISED ACTIONS SHAPE IS")
+                # print(noised_actions.shape)
+                print("LOSS FLOW IS")
+                print(loss_flow)
+
+                
+
 
             # Normalize loss to account for gradient accumulation
             normalized_loss = loss / cfg.grad_accumulation_steps
@@ -268,7 +329,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             normalized_loss.backward()
 
             # Compute Accuracy and L1 Loss for Logging
-            action_logits = output.logits[:, vla.module.vision_backbone.featurizer.patch_embed.num_patches : -1]
+            action_logits = output.logits[:, vla.module.vla.vision_backbone.featurizer.patch_embed.num_patches : -1]
             action_preds = action_logits.argmax(dim=2)
             action_gt = batch["labels"][:, 1:].to(action_preds.device)
             mask = action_gt > action_tokenizer.action_token_begin_idx
@@ -328,7 +389,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
                     # Save Processor & Weights
                     processor.save_pretrained(run_dir)
-                    vla.module.save_pretrained(save_dir)
+                    vla.module.vla.save_pretrained(save_dir)
 
                 # Wait for processor and adapter weights to be saved by main process
                 dist.barrier()
