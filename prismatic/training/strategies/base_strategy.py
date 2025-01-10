@@ -440,23 +440,25 @@ class TrainingStrategy(ABC):
                     "cuda", dtype=self.mixed_precision_dtype, enabled=self.enable_mixed_precision_training
                 ):
                     # [Contract] self.vlm.forward() must automatically compute `loss` and return!
+                    # We do not need the next token prediction loss
+                    # loss = output.loss
+                    actions = batch["action"]
+                    random_noise_like_action = torch.randn_like(actions).to(actions.device)
+                    # Sample pytorch tensor from beta distribution
+                    time_sample = torch.distributions.beta.Beta(1.5, 1).sample(actions.shape[:1]).unsqueeze(-1).unsqueeze(-1).to(actions.device)
+                    noised_actions = time_sample * actions + (1 - time_sample) * random_noise_like_action
                     output, flow = self.vlm(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         pixel_values=batch["pixel_values"],
                         labels=batch["labels"],
                         proprio=batch["proprio"],
-                        actions=batch["action"],
+                        actions=noised_actions,
+                        tau=time_sample,
                         output_hidden_states=True
                     )
-                    # We do not need the next token prediction loss
-                    # loss = output.loss
-                    actions = batch["action"].to(flow.device)
-                    random_noise_like_action = torch.randn_like(actions).to(actions.device)
-                    # Sample pytorch tensor from beta distribution
-                    time_sample = torch.distributions.beta.Beta(1.5, 1).sample(actions.shape[:1]).unsqueeze(-1).unsqueeze(-1).to(actions.device)
-                    noised_actions = time_sample * actions + (1 - time_sample) * random_noise_like_action
                     d_xt = actions - random_noise_like_action
+                    d_xt = d_xt.to(flow.device)
                     loss_flow = loss_fn(flow, d_xt)
 
                 # Commit Loss =>> Backward!

@@ -85,8 +85,8 @@ class Exp_SigLIP_224px_Bridge(VLAConfig):
     # FIXME: change back to 8, this is just for testing
     expected_world_size: int = 8
     # FIXME: change back to 256, this is just for testing
-    global_batch_size: int = 32
-    per_device_batch_size: int = 4
+    global_batch_size: int = 16
+    per_device_batch_size: int = 2
 
     learning_rate: float = 2e-5
     weight_decay: float = 0.0

@@ -17,7 +17,6 @@ class OpenVLAFlowMatching(PrismaticVLM):
             num_heads=self.llm_backbone.llm.config.num_attention_heads,
             num_layers=(self.llm_backbone.llm.config.num_hidden_layers + 1)
         )
-        
 
 
     def forward(
@@ -28,6 +27,7 @@ class OpenVLAFlowMatching(PrismaticVLM):
         labels,
         proprio,
         actions,
+        tau,
         output_hidden_states=True
     ):
         outputs = super().forward(
@@ -39,6 +39,7 @@ class OpenVLAFlowMatching(PrismaticVLM):
         )
         flow = self.action_expert(
             action_states=actions,
+            tau=tau,
             vlm_hidden_states=outputs.hidden_states,
             robot_state=proprio
         )
@@ -46,10 +47,11 @@ class OpenVLAFlowMatching(PrismaticVLM):
 
 
 class DeepActionExpert(nn.Module):
-    def __init__(self, hidden_dim, num_heads, num_layers):
+    def __init__(self, hidden_dim, num_heads, num_layers, max_period=10000):
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
+        self.max_period = max_period
         
         # Create one cross attention layer per VLM layer we want to attend to
         self.cross_attention_layers = nn.ModuleList([
@@ -81,7 +83,7 @@ class DeepActionExpert(nn.Module):
         self.final_action_flow_proj = nn.Linear(hidden_dim, 7)
         self.tanh = nn.Tanh()
 
-    def initial_action_transform(self, action_stataes, tau):
+    def initial_action_transform(self, action_states, tau):
         """
         action_states: [batch, action_seq, dim]
         tau: [batch, 1, 1]
@@ -107,7 +109,7 @@ class DeepActionExpert(nn.Module):
         # Create the range of dimensions
         dims = torch.arange(half_dim, device=device).float()
         # Create the scale factors
-        factors = torch.exp(-math.log(self.max_period) * (2 * dims / self.embedding_dim))
+        factors = torch.exp(-math.log(self.max_period) * (2 * dims / self.hidden_dim))
         
         # Compute angles
         angles = tau * factors  # (batch_size, 1, half_dim)
@@ -128,7 +130,7 @@ class DeepActionExpert(nn.Module):
         vlm_hidden_states: List of [batch, vlm_seq, dim] from each VLM layer
         robot_state: [batch, 1, dim]
         """
-        hidden_states = self.initial_action_transform(action_states)
+        hidden_states = self.initial_action_transform(action_states, tau)
         robot_state = self.proprio_linear(robot_state)
 
         # Process through each layer, attending to corresponding VLM layer
