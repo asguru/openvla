@@ -18,6 +18,7 @@ Usage:
 """
 
 import os
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Optional, Union
 
 import draccus
 import numpy as np
+import torch
 import tqdm
 from libero.libero import benchmark
 
@@ -50,6 +52,11 @@ from experiments.robot.robot_utils import (
     set_seed_everywhere,
 )
 
+from huggingface_hub import HfFileSystem, hf_hub_download
+
+
+VLA_HF_HUB_REPO = "openvla/openvla-dev"
+
 
 @dataclass
 class GenerateConfig:
@@ -59,9 +66,11 @@ class GenerateConfig:
     # Model-specific parameters
     #################################################################################################################
     model_family: str = "openvla"                    # Model family
-    pretrained_checkpoint: Union[str, Path] = ""     # Pretrained checkpoint path
+    pretrained_checkpoint: Union[str, Path] = "prism-dinosiglip-224px+7b"     # Pretrained checkpoint path
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
+
+    use_action_expert: bool = False                  # Use action expert for OpenVLA
 
     center_crop: bool = True                         # Center crop? (if trained w/ random crop image aug)
 
@@ -77,6 +86,8 @@ class GenerateConfig:
     #################################################################################################################
     run_id_note: Optional[str] = None                # Extra note to add in run ID for logging
     local_log_dir: str = "./experiments/logs"        # Local directory for eval logs
+
+    hf_token: Union[str, Path] = Path(".hf_token")   # Hugging Face token for loading models
 
     use_wandb: bool = False                          # Whether to also log results in Weights & Biases
     wandb_project: str = "YOUR_WANDB_PROJECT"        # Name of W&B project to log to (use default!)
@@ -103,6 +114,17 @@ def eval_libero(cfg: GenerateConfig) -> None:
     # Load model
     model = get_model(cfg)
 
+    if not model.norm_stats:
+        model_type = "pretrained"
+        # relpath = Path(model_type) / "openvla/openvla-7b"
+        # dataset_statistics_json = hf_hub_download(
+        #     repo_id=VLA_HF_HUB_REPO, filename=f"{(relpath / 'dataset_statistics.json')!s}", cache_dir=None
+        # )
+
+        with open("datasets/libero_spatial_no_noops/1.0.0/dataset_statistics_e3e8f1d2b790d635d7faabd2059fbd6536a52676934ec4c7843d956fd26c8b3f.json", "r") as f:
+            test_norm_stats = json.load(f)
+        model.norm_stats = {"libero_spatial_no_noops": test_norm_stats}
+
     # [OpenVLA] Check that the model contains the action un-normalization key
     if cfg.model_family == "openvla":
         # In some cases, the key must be manually modified (e.g. after training on a modified version of the dataset
@@ -115,6 +137,12 @@ def eval_libero(cfg: GenerateConfig) -> None:
     processor = None
     if cfg.model_family == "openvla":
         processor = get_processor(cfg)
+
+    image_transform = None
+    base_tokenizer = None
+    if cfg.use_action_expert:
+        image_transform = model.vision_backbone.get_image_transform()
+        base_tokenizer = model.llm_backbone.get_tokenizer()
 
     # Initialize local logging
     run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
@@ -132,6 +160,10 @@ def eval_libero(cfg: GenerateConfig) -> None:
             project=cfg.wandb_project,
             name=run_id,
         )
+    
+    # Send model to bfloat16
+    model = model.to(torch.bfloat16)
+    model.cuda()
 
     # Initialize LIBERO task suite
     benchmark_dict = benchmark.get_benchmark_dict()
@@ -214,8 +246,11 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         observation,
                         task_description,
                         processor=processor,
+                        base_tokenizer=base_tokenizer,
+                        image_transform=image_transform,
                     )
 
+                    action = action.cpu().squeeze()
                     # Normalize gripper action [0,1] -> [-1,+1] because the environment expects the latter
                     action = normalize_gripper_action(action, binarize=True)
 
@@ -225,7 +260,16 @@ def eval_libero(cfg: GenerateConfig) -> None:
                         action = invert_gripper_action(action)
 
                     # Execute action in environment
-                    obs, reward, done, info = env.step(action.tolist())
+                    if cfg.use_action_expert:
+                        # Take 10 steps with the action expert output
+                        done = False
+                        # While not done and not at 10 steps
+                        for i in range(10):
+                            obs, reward, done, info = env.step(action[i].tolist())
+                            if done:
+                                break
+                    else:
+                        obs, reward, done, info = env.step(action.tolist())
                     if done:
                         task_successes += 1
                         total_successes += 1

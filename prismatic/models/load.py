@@ -61,8 +61,12 @@ def load(
         overwatch.info(f"Loading from local path `{(run_dir := Path(model_id_or_path))}`")
 
         # Get paths for `config.json` and pretrained checkpoint
-        config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "latest-checkpoint.pt"
+        # config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "latest-checkpoint.pt"
+        config_json, checkpoint_pt = run_dir / "config.json", run_dir / "checkpoints" / "step-050000-epoch-01-loss=0.1905.pt"
         assert config_json.exists(), f"Missing `config.json` for `{run_dir = }`"
+        # FIXME: remove the below, a hack to get load working
+        model_id = GLOBAL_REGISTRY["prism-dinosiglip-224px+7b"]['model_id']
+        config_json = hf_hub_download(repo_id=HF_HUB_REPO, filename=f"{model_id}/config.json", cache_dir=cache_dir)
         assert checkpoint_pt.exists(), f"Missing checkpoint for `{run_dir = }`"
     else:
         if model_id_or_path not in GLOBAL_REGISTRY:

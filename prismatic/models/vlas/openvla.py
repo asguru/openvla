@@ -46,6 +46,7 @@ class OpenVLA(PrismaticVLM):
 
         @return Unnormalized (continuous) action vector --> end-effector deltas.
         """
+        print("_-----------DOING PREDICT ACTION OPENVLA-----------------")
         image_transform, tokenizer = self.vision_backbone.image_transform, self.llm_backbone.tokenizer
 
         # Build VLA Prompt

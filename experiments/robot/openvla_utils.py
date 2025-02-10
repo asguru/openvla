@@ -10,6 +10,7 @@ import torch
 from PIL import Image
 from transformers import AutoConfig, AutoImageProcessor, AutoModelForVision2Seq, AutoProcessor
 
+from prismatic.models import load
 from prismatic.extern.hf.configuration_prismatic import OpenVLAConfig
 from prismatic.extern.hf.modeling_prismatic import OpenVLAForActionPrediction
 from prismatic.extern.hf.processing_prismatic import PrismaticImageProcessor, PrismaticProcessor
@@ -34,33 +35,41 @@ def get_vla(cfg):
     print("[*] Instantiating Pretrained VLA model")
     print("[*] Loading in BF16 with Flash-Attention Enabled")
 
-    # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
-    AutoConfig.register("openvla", OpenVLAConfig)
-    AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
-    AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
-    AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
+    if not cfg.use_action_expert:
+        # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
+        AutoConfig.register("openvla", OpenVLAConfig)
+        AutoImageProcessor.register(OpenVLAConfig, PrismaticImageProcessor)
+        AutoProcessor.register(OpenVLAConfig, PrismaticProcessor)
+        AutoModelForVision2Seq.register(OpenVLAConfig, OpenVLAForActionPrediction)
 
-    vla = AutoModelForVision2Seq.from_pretrained(
-        cfg.pretrained_checkpoint,
-        attn_implementation="flash_attention_2",
-        torch_dtype=torch.bfloat16,
-        load_in_8bit=cfg.load_in_8bit,
-        load_in_4bit=cfg.load_in_4bit,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    )
+        vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.pretrained_checkpoint,
+            # attn_implementation="flash_attention_2",
+            torch_dtype=torch.bfloat16,
+            load_in_8bit=cfg.load_in_8bit,
+            load_in_4bit=cfg.load_in_4bit,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        )
+    else:
+        # prism-dinosiglip-224px+mx-bridge
+        # prism-dinosiglip-224px+7b
+        print("-------cfg pretrained checkpoint is {}---------".format(cfg.pretrained_checkpoint))
+        vla = load(cfg.pretrained_checkpoint, hf_token=cfg.hf_token, load_for_training=False, load_action_expert=True)
 
     # Move model to device.
     # Note: `.to()` is not supported for 8-bit or 4-bit bitsandbytes models, but the model will
     #       already be set to the right devices and casted to the correct dtype upon loading.
-    if not cfg.load_in_8bit and not cfg.load_in_4bit:
-        vla = vla.to(DEVICE)
+    # if not cfg.load_in_8bit and not cfg.load_in_4bit:
+    #     vla = vla.to(DEVICE)
 
     # Load dataset stats used during finetuning (for action un-normalization).
     dataset_statistics_path = os.path.join(cfg.pretrained_checkpoint, "dataset_statistics.json")
     if os.path.isfile(dataset_statistics_path):
         with open(dataset_statistics_path, "r") as f:
             norm_stats = json.load(f)
+        print("norm stats are")
+        print(norm_stats)
         vla.norm_stats = norm_stats
     else:
         print(
@@ -124,7 +133,7 @@ def crop_and_resize(image, crop_scale, batch_size):
     return image
 
 
-def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, center_crop=False):
+def get_vla_action(vla, processor, base_tokenizer, image_transform, base_vla_name, obs, task_label, unnorm_key, center_crop=False):
     """Generates an action with the VLA policy."""
     image = Image.fromarray(obs["full_image"])
     image = image.convert("RGB")
@@ -163,8 +172,28 @@ def get_vla_action(vla, processor, base_vla_name, obs, task_label, unnorm_key, c
         prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
 
     # Process inputs.
-    inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
+    # If base_tokenizer and image_transform are not None, we use those. Otherwise, we use the processor.
+    if base_tokenizer is not None and image_transform is not None:
+        # inputs = processor(prompt, image, base_tokenizer, image_transform).to(DEVICE, dtype=torch.bfloat16)
+        # Should we invoke prompt builder below via prompt_builder.get_prompt()? Or just use prompt as is done now?
+        input_ids = base_tokenizer(prompt, add_special_tokens=True).input_ids
+
+        # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
+        #   =>> IMPORTANT :: IF WE'RE USING HF LLM.forward(..., labels=labels), SHIFTING HAPPENS _INSIDE_ MODEL!
+        input_ids = torch.tensor(input_ids).unsqueeze(0).to(DEVICE, dtype=torch.long)
+        pixel_values = {k: v.unsqueeze(0).to(DEVICE, dtype=torch.bfloat16) for k, v in image_transform(image).items()}
+        attention_mask = torch.ones(input_ids.shape, dtype=torch.long).to(DEVICE)
+        inputs = {"input_ids": input_ids, "pixel_values": pixel_values, "attention_mask": attention_mask}
+    else:
+        inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
+    
+    # We now transform the observation into the format expected by the model.
+    proprio = torch.tensor(obs["state"]).unsqueeze(0).unsqueeze(0).to(DEVICE, dtype=torch.bfloat16)
+    inputs["proprio"] = proprio
+    # print("prompt is {}".format(prompt))
+    #inputs = processor(prompt, image).to(DEVICE, dtype=torch.bfloat16)
 
     # Get action.
+    # with torch.autocast(device_type="cuda:0", dtype=torch.bfloat16):
     action = vla.predict_action(**inputs, unnorm_key=unnorm_key, do_sample=False)
     return action

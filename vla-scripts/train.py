@@ -24,7 +24,6 @@ from typing import Optional, Tuple, Union
 
 import draccus
 import torch
-import torch.nn as nn
 import torch.distributed as dist
 import yaml
 
@@ -70,7 +69,7 @@ class TrainConfig:
     # Run Arguments
     run_id: Optional[str] = None                                    # Run ID for logging, Weights & Biases
     run_id_note: Optional[str] = None                               # Extra note for logging, Weights & Biases
-    save_interval: int = 2500                                       # Interval for saving checkpoints (in steps)
+    save_interval: int = 10000                                       # Interval for saving checkpoints (in steps)
     image_aug: bool = False                                         # Whether to enable image augmentations
     seed: int = 7                                                   # Random seed (for reproducibility)
 
@@ -194,7 +193,7 @@ def train(cfg: TrainConfig) -> None:
     # [Explicit] Call to `freeze_backbones` here for clarity =>> will log exactly what is/is not frozen
     overwatch.info(f"Invoking `VLM.freeze_backbones()` for `{vla_id}` => Stage: `{stage}`")
     # FIXME: Arjun: can uncommment later, want to see what else breaks
-    #vlm.freeze_backbones(stage)
+    vlm.freeze_backbones(stage)
 
     # Print number of total/trainable model parameters
     num_params = sum(p.numel() for p in vlm.parameters())

@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from torch.utils.data import DataLoader, Dataset, DistributedSampler, IterableDataset
+from torchdiffeq import odeint
 from tqdm import tqdm
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
@@ -416,6 +417,7 @@ class TrainingStrategy(ABC):
 
         # Declare an MSELoss to be used in flow matching loss expression
         loss_fn = nn.MSELoss()
+        loss_val = nn.L1Loss()
 
         # === Train ===
         status = metrics.get_status()
@@ -461,64 +463,67 @@ class TrainingStrategy(ABC):
                     d_xt = d_xt.to(flow.device)
                     loss_flow = loss_fn(flow, d_xt)
 
+                    # with torch.no_grad():
+                    #     x_init = torch.randn_like(actions).to(flow.device)
+                    #     time_grid = torch.linspace(0,1,20).float()
+
+                    #     for (t0, t1) in zip(time_grid[:-1], time_grid[1:]):
+                    #         t0 = t0.view(1, 1, 1).expand(actions.shape[0], 1, 1).to(flow.device)
+                    #         t1 = t1.view(1, 1, 1).expand(actions.shape[0], 1, 1).to(flow.device)
+                    #         _, dxdt = self.vlm(
+                    #             input_ids=batch["input_ids"],
+                    #             attention_mask=batch["attention_mask"],
+                    #             pixel_values=batch["pixel_values"],
+                    #             labels=batch["labels"],
+                    #             proprio=batch["proprio"],
+                    #             actions=x_init,
+                    #             tau=t0,
+                    #             output_hidden_states=True
+                    #         )
+                    #         dt = t1 - t0
+                    #         x_init = x_init + (dxdt * dt)
+
+                    #     actions = actions.to(flow.device)
+                    #     action_error = loss_val(x_init, actions)
+
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss_flow)
                 loss_flow.backward()
 
-                # === Compute Action Token Accuracy & L1 Loss ===
-
-                # To compute action token accuracy, we need to identify the locations of the action tokens
-                # in both `output.logits` and `batch["labels"]`. We know that when "right" padding, we
-                # insert `self.vlm.vision_backbone.num_patches` at index 1.
-                #
-                # Computing `action_prediction_accuracy` is then pretty straightforward:
-                #   1) Extract "aligned" predictions & labels
-                #   2) Compute boolean "mask" where "labels > 2" (where 2 is ID for `EOS_TOKEN`)
-                #           => If masking out EOS, then it's just "labels != -100 (IGNORE_INDEX)
-                #   3) Compute masked accuracy as `(preds == logits) & mask` --> sum/divide by # unmasked!
-                # action_preds = output.logits[:, self.vlm.vision_backbone.num_patches : -1].argmax(dim=2)
-                # action_gt = batch["labels"][:, 1:].to(action_preds.device)
-                # mask = action_gt > action_tokenizer.action_token_begin_idx
-
-                # Compute Accuracy
-                # correct_preds = (action_preds == action_gt) & mask
-                # action_accuracy = correct_preds.sum().float() / mask.sum().float()
-
-                # Compute L1 Loss on Predicted (Continuous) Actions
-                # continuous_actions_pred = torch.tensor(
-                #     action_tokenizer.decode_token_ids_to_actions(action_preds[mask].cpu().numpy())
-                # )
-                # continuous_actions_gt = torch.tensor(
-                #     action_tokenizer.decode_token_ids_to_actions(action_gt[mask].cpu().numpy())
-                # )
-                # action_l1_loss = torch.nn.functional.l1_loss(continuous_actions_pred, continuous_actions_gt)
-
                 # Commit Metrics
-                # metrics.commit(action_accuracy=action_accuracy, l1_loss=action_l1_loss, update_step_time=True)
+                # metrics.commit(l1_loss=action_error)
 
-                # Compute metrics per dataset --> only on rank_zero since we don't log them on other workers anyways
-                # if overwatch.is_rank_zero():
-                #     datasets = set(batch["dataset_names"])
-                #     if len(datasets) > 1:
-                #         for ds in datasets:
-                #             ds_mask = torch.tensor([elem == ds for elem in batch["dataset_names"]])
-                #             action_accuracy_ds = correct_preds[ds_mask].sum().float() / mask[ds_mask].sum().float()
-                #             continuous_actions_pred_ds = torch.tensor(
-                #                 action_tokenizer.decode_token_ids_to_actions(
-                #                     action_preds[ds_mask][mask[ds_mask]].cpu().numpy()
-                #                 )
-                #             )
-                #             continuous_actions_gt_ds = torch.tensor(
-                #                 action_tokenizer.decode_token_ids_to_actions(
-                #                     action_gt[ds_mask][mask[ds_mask]].cpu().numpy()
-                #                 )
-                #             )
-                #             action_l1_loss_ds = torch.nn.functional.l1_loss(
-                #                 continuous_actions_pred_ds, continuous_actions_gt_ds
-                #             )
-                #             metrics.commit_for_dataset(
-                #                 dataset_name=ds.decode(), action_accuracy=action_accuracy_ds, l1_loss=action_l1_loss_ds
-                #             )
+                # === Compute Action Accuracy (L1 Loss) ===
+                # In this step, we integrate the flow field and recover the predicted actions
+                # for the current frame. We then compute the L1 loss between the predicted and
+                # GT action chunk
+                def ode_func(t, x):
+                    #return self.velocity_model(x=x, t=t, **model_extras)
+                    _, flow = self.vlm(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        pixel_values=batch["pixel_values"],
+                        labels=batch["labels"],
+                        proprio=batch["proprio"],
+                        actions=x,
+                        tau=t,
+                        output_hidden_states=True
+                    )
+                    return flow
+
+                
+
+                """sol = odeint(
+                    ode_func,
+                    x_init,
+                    time_grid,
+                    method="euler",
+                    # options=ode_opts,
+                    atol=1e-5,
+                    rtol=1e-5,
+                )"""
+
+                
 
                 # === Gradient Step ===
 
@@ -542,7 +547,7 @@ class TrainingStrategy(ABC):
                     (metrics.global_step % save_interval) == 0
                 ):
                     self.save_checkpoint(
-                        metrics.run_dir, metrics.global_step, epoch, loss.item(), only_trainable=not save_full_model
+                        metrics.run_dir, metrics.global_step, epoch, loss_flow.item(), only_trainable=not save_full_model
                     )
                     dist.barrier()
 

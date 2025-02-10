@@ -79,16 +79,16 @@ class Exp_SigLIP_224px_Bridge(VLAConfig):
     shuffle_buffer_size: int = 256_000
 
     # Optimization Parameters
-    epochs: int = 1000
-    max_steps: Optional[int] = None
+    epochs: int = 10 # Was 1000
+    max_steps: Optional[int] = 50000
 
     # FIXME: change back to 8, this is just for testing
     expected_world_size: int = 8
     # FIXME: change back to 256, this is just for testing
-    global_batch_size: int = 16
-    per_device_batch_size: int = 2
+    global_batch_size: int = 48
+    per_device_batch_size: int = 6
 
-    learning_rate: float = 2e-5
+    learning_rate: float = 5e-6 # Was 2e-5 before
     weight_decay: float = 0.0
     max_grad_norm: float = 1.0
     lr_scheduler_type: str = "constant"
